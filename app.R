@@ -1,0 +1,226 @@
+library(shiny)
+library(tidyverse)
+library(plotly)
+library(DT)
+library(lubridate)
+library(scales)
+
+netflix_raw <- read_csv("https://raw.githubusercontent.com/rfordatascience/tidytuesday/master/data/2021/2021-04-20/netflix_titles.csv")
+
+netflix_clean <- netflix_raw %>%
+  mutate(
+    date_added = mdy(date_added),
+    year_added = year(date_added),
+    month_added = month(date_added, label = TRUE),
+    quarter_added = quarter(date_added)
+  ) %>%
+  mutate(
+    duration_value = as.numeric(str_extract(duration, "\\d+")),
+    duration_type = case_when(
+      str_detect(duration, "Season") ~ "Seasons",
+      str_detect(duration, "min") ~ "Minutes",
+      TRUE ~ "Unknown"
+    )
+  ) %>%
+  mutate(
+    rating_group = case_when(
+      rating %in% c("G", "TV-Y", "TV-G") ~ "All Ages",
+      rating %in% c("PG", "TV-Y7", "TV-Y7-FV", "TV-PG") ~ "Older Kids",
+      rating %in% c("PG-13", "TV-14") ~ "Teens",
+      rating %in% c("R", "TV-MA", "NC-17") ~ "Adults",
+      is.na(rating) ~ "Unrated",
+      TRUE ~ "Other"
+    )
+  ) %>%
+  mutate(country = if_else(is.na(country), "Unknown", country)) %>%
+  mutate(
+    listed_in = str_trim(listed_in),
+    country = str_trim(country),
+    title = str_trim(title)
+  ) %>%
+  filter(!is.na(title), !is.na(type))
+
+all_genres <- netflix_clean %>%
+  separate_rows(listed_in, sep = ", ") %>%
+  pull(listed_in) %>%
+  unique() %>%
+  sort()
+
+top_countries <- netflix_clean %>%
+  separate_rows(country, sep = ", ") %>%
+  count(country, sort = TRUE) %>%
+  head(20) %>%
+  pull(country)
+
+ui <- fluidPage(
+  tags$head(tags$style(HTML("
+    body { font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; background-color: #141414; color: #ffffff; }
+    .title-panel { background: linear-gradient(135deg, #E50914 0%, #B20710 100%); color: white; padding: 40px; margin-bottom: 30px; border-radius: 8px; box-shadow: 0 8px 16px rgba(229, 9, 20, 0.3); }
+    .title-panel h1 { font-size: 42px; font-weight: bold; margin: 0 0 10px 0; letter-spacing: -1px; }
+    .title-panel p { font-size: 16px; margin: 0; opacity: 0.9; }
+    .sidebar { background: #1a1a1a; padding: 25px; border-radius: 8px; box-shadow: 0 4px 8px rgba(0,0,0,0.4); border: 1px solid #2a2a2a; }
+    .sidebar h3 { color: #E50914; font-weight: bold; margin-bottom: 15px; font-size: 20px; }
+    .sidebar label { color: #ffffff; font-weight: 500; }
+    .well { background-color: #1a1a1a !important; border: 1px solid #2a2a2a !important; }
+    .plot-container { background: #1a1a1a; padding: 30px; border-radius: 8px; margin-bottom: 25px; box-shadow: 0 4px 8px rgba(0,0,0,0.4); border: 1px solid #2a2a2a; }
+    .plot-container h3 { color: #ffffff; font-weight: bold; margin-bottom: 10px; font-size: 24px; }
+    .annotation-box { background: #222222; border-left: 4px solid #E50914; padding: 12px 16px; margin-bottom: 20px; border-radius: 0 6px 6px 0; font-size: 14px; color: #cccccc; line-height: 1.6; }
+    .annotation-box strong { color: #ffffff; }
+    .btn-primary { background: linear-gradient(135deg, #E50914 0%, #B20710 100%); border: none; padding: 12px; font-weight: bold; transition: transform 0.2s; color: white; }
+    .btn-primary:hover { transform: translateY(-2px); box-shadow: 0 4px 8px rgba(229, 9, 20, 0.5); background: linear-gradient(135deg, #ff0a16 0%, #c10812 100%); }
+    .nav-tabs { border-bottom: 2px solid #2a2a2a; }
+    .nav-tabs > li > a { color: #b3b3b3; background-color: #1a1a1a; border: 1px solid #2a2a2a; margin-right: 5px; font-weight: 600; }
+    .nav-tabs > li > a:hover { background-color: #2a2a2a; border-color: #E50914; color: #E50914; }
+    .nav-tabs > li.active > a, .nav-tabs > li.active > a:hover, .nav-tabs > li.active > a:focus { color: #ffffff; background-color: #E50914; border: 1px solid #E50914; border-bottom-color: transparent; }
+    .selectize-input { background-color: #2a2a2a !important; border: 1px solid #404040 !important; color: #ffffff !important; }
+    .selectize-dropdown { background-color: #2a2a2a !important; border: 1px solid #404040 !important; color: #ffffff !important; }
+    .selectize-dropdown-content .option { color: #ffffff !important; }
+    .selectize-dropdown-content .option:hover { background-color: #E50914 !important; color: #ffffff !important; }
+    input[type='text'], input[type='number'], select { background-color: #2a2a2a !important; border: 1px solid #404040 !important; color: #ffffff !important; }
+    .irs--shiny .irs-bar { background: #E50914; border-color: #E50914; }
+    .irs--shiny .irs-from, .irs--shiny .irs-to, .irs--shiny .irs-single { background: #E50914; }
+    .irs--shiny .irs-handle { border-color: #E50914; }
+    .checkbox label, .radio label { color: #ffffff !important; }
+    .filter-hint { font-size: 12px; color: #888888; margin-top: -8px; margin-bottom: 12px; }
+  "))),
+
+  div(class = "title-panel",
+      h1("NETFLIX: Content in the Age of COVID-19"),
+      p("Exploring how the pandemic reshaped Netflix's global content library from 2008 to 2021.")),
+
+  sidebarLayout(
+    sidebarPanel(width = 3, class = "sidebar",
+      h3("Filters"),
+      p(class = "filter-hint", "All charts update instantly when filters change."),
+      hr(style = "border-color: #2a2a2a;"),
+      sliderInput("year_range", "Year Added to Netflix:", min = 2008, max = 2021, value = c(2008, 2021), step = 1, sep = "", ticks = FALSE),
+      p(class = "filter-hint", "Try narrowing to 2018-2021 to focus on the COVID era."),
+      checkboxGroupInput("content_type", "Content Type:", choices = c("Movie", "TV Show"), selected = c("Movie", "TV Show")),
+      selectInput("countries", "Countries (Top 20):", choices = c("All Countries", top_countries), selected = "All Countries", multiple = TRUE, selectize = TRUE),
+      p(class = "filter-hint", "Select one or more countries to compare production output."),
+      selectInput("genres", "Genres:", choices = c("All Genres", all_genres), selected = "All Genres", multiple = TRUE, selectize = TRUE),
+      radioButtons("rating_filter", "Content Rating:", choices = c("All Ratings" = "all", "All Ages" = "All Ages", "Older Kids" = "Older Kids", "Teens" = "Teens", "Adults" = "Adults", "Unrated" = "Unrated"), selected = "all"),
+      hr(style = "border-color: #2a2a2a;"),
+      actionButton("reset", "Reset All Filters", class = "btn-primary btn-block", icon = icon("refresh"), style = "margin-top: 10px;")
+    ),
+
+    mainPanel(width = 9,
+      tabsetPanel(type = "tabs",
+        tabPanel("Content Over Time", br(),
+          div(class = "plot-container",
+              h3("Content Added Over Time"),
+              div(class = "annotation-box", HTML("<strong>What to look for:</strong> Netflix's content additions grew rapidly from 2015 onward, peaking around 2019. Notice the sharp decline in 2020 — a year when global film and TV production was halted by COVID-19 lockdowns. This challenges the assumption that Netflix <em>boomed</em> during the pandemic; while viewership surged, new content additions actually fell significantly.")),
+              plotlyOutput("timeline_plot", height = "450px"))),
+        tabPanel("Top Countries", br(),
+          div(class = "plot-container",
+              h3("Top Content-Producing Countries"),
+              div(class = "annotation-box", HTML("<strong>What to look for:</strong> The United States dominates Netflix's library by a wide margin, with India and the UK as distant second and third. Notice how India's output is movie-heavy compared to the more balanced US ratio. Use the <em>Countries</em> filter to isolate specific regions.")),
+              plotlyOutput("country_plot", height = "550px"))),
+        tabPanel("Popular Genres", br(),
+          div(class = "plot-container",
+              h3("Most Popular Genres"),
+              div(class = "annotation-box", HTML("<strong>What to look for:</strong> Dramas and comedies consistently dominate Netflix's catalog. Try filtering by year range to compare genre distribution before and after 2020 — documentary content saw a relative rise during COVID-19, likely because documentaries are cheaper and faster to produce than scripted series.")),
+              plotlyOutput("genre_plot", height = "450px"))),
+        tabPanel("Content Ratings", br(),
+          div(class = "plot-container",
+              h3("Content Rating Distribution"),
+              div(class = "annotation-box", HTML("<strong>What to look for:</strong> The majority of Netflix's library is rated for mature audiences (TV-MA, R). Use the <em>Content Rating</em> filter to isolate family-friendly content and see how its volume changed over time. As Netflix competes for subscribers, is it leaving younger audiences behind?")),
+              plotlyOutput("rating_plot", height = "400px")))
+      )
+    )
+  )
+)
+
+server <- function(input, output, session) {
+
+  filtered_data <- reactive({
+    data <- netflix_clean
+    if (!is.null(input$year_range)) {
+      data <- data %>% filter(year_added >= input$year_range[1], year_added <= input$year_range[2])
+    }
+    if (!is.null(input$content_type) && length(input$content_type) > 0) {
+      data <- data %>% filter(type %in% input$content_type)
+    }
+    if (!is.null(input$countries) && !("All Countries" %in% input$countries)) {
+      data <- data %>% separate_rows(country, sep = ", ") %>% filter(country %in% input$countries) %>% group_by(show_id) %>% slice(1) %>% ungroup()
+    }
+    if (!is.null(input$genres) && !("All Genres" %in% input$genres)) {
+      data <- data %>% separate_rows(listed_in, sep = ", ") %>% filter(listed_in %in% input$genres) %>% group_by(show_id) %>% slice(1) %>% ungroup()
+    }
+    if (input$rating_filter != "all") {
+      data <- data %>% filter(rating_group == input$rating_filter)
+    }
+    return(data)
+  })
+
+  output$timeline_plot <- renderPlotly({
+    data <- filtered_data() %>% filter(!is.na(year_added)) %>% count(year_added, type)
+    plot_ly(data, x = ~year_added, y = ~n, color = ~type, type = 'scatter', mode = 'lines+markers',
+            colors = c("#E50914", "#ffffff"), line = list(width = 3), marker = list(size = 8)) %>%
+      layout(title = "",
+             xaxis = list(title = "Year", color = "#ffffff", gridcolor = "#2a2a2a", fixedrange = TRUE),
+             yaxis = list(title = "Number of Titles Added", color = "#ffffff", gridcolor = "#2a2a2a", fixedrange = TRUE),
+             hovermode = "x unified", dragmode = FALSE,
+             paper_bgcolor = "#1a1a1a", plot_bgcolor = "#1a1a1a", font = list(color = "#ffffff"),
+             shapes = list(list(type = "line", x0 = 2020, x1 = 2020, y0 = 0, y1 = 1, yref = "paper",
+                               line = list(color = "#ffffff", width = 1.5, dash = "dot"))),
+             annotations = list(list(x = 2020.1, y = 0.95, xref = "x", yref = "paper",
+                                     text = "COVID-19 (2020)", showarrow = FALSE,
+                                     font = list(color = "#aaaaaa", size = 11), xanchor = "left")),
+             legend = list(orientation = "h", x = 0.5, xanchor = "center", y = -0.15,
+                           font = list(color = "#ffffff"), itemclick = FALSE, itemdoubleclick = FALSE)) %>%
+      config(displayModeBar = FALSE, scrollZoom = FALSE)
+  })
+
+  output$country_plot <- renderPlotly({
+    data <- filtered_data() %>% separate_rows(country, sep = ", ") %>%
+      count(country, type, sort = TRUE) %>% group_by(country) %>%
+      mutate(total = sum(n)) %>% ungroup() %>% arrange(desc(total)) %>% head(30)
+    plot_ly(data, y = ~reorder(country, total), x = ~n, color = ~type,
+            type = 'bar', orientation = 'h', colors = c("#E50914", "#ffffff")) %>%
+      layout(title = "",
+             xaxis = list(title = "Number of Titles", color = "#ffffff", gridcolor = "#2a2a2a", fixedrange = TRUE),
+             yaxis = list(title = "", color = "#ffffff", fixedrange = TRUE),
+             barmode = 'stack', hovermode = "y unified", dragmode = FALSE,
+             paper_bgcolor = "#1a1a1a", plot_bgcolor = "#1a1a1a", font = list(color = "#ffffff"),
+             legend = list(font = list(color = "#ffffff"), itemclick = FALSE, itemdoubleclick = FALSE)) %>%
+      config(displayModeBar = FALSE, scrollZoom = FALSE)
+  })
+
+  output$genre_plot <- renderPlotly({
+    data <- filtered_data() %>% separate_rows(listed_in, sep = ", ") %>%
+      count(listed_in, sort = TRUE) %>% head(15)
+    plot_ly(data, x = ~reorder(listed_in, n), y = ~n, type = 'bar',
+            marker = list(color = "#E50914", line = list(color = "#ffffff", width = 1))) %>%
+      layout(title = "",
+             xaxis = list(title = "", tickangle = -45, color = "#ffffff", fixedrange = TRUE),
+             yaxis = list(title = "Number of Titles", color = "#ffffff", gridcolor = "#2a2a2a", fixedrange = TRUE),
+             dragmode = FALSE, paper_bgcolor = "#1a1a1a", plot_bgcolor = "#1a1a1a",
+             font = list(color = "#ffffff"), margin = list(b = 120)) %>%
+      config(displayModeBar = FALSE, scrollZoom = FALSE)
+  })
+
+  output$rating_plot <- renderPlotly({
+    data <- filtered_data() %>% count(rating_group, type) %>%
+      group_by(rating_group) %>% mutate(total = sum(n)) %>% ungroup()
+    plot_ly(data, x = ~reorder(rating_group, -total), y = ~n, color = ~type,
+            type = 'bar', colors = c("#E50914", "#ffffff")) %>%
+      layout(title = "",
+             xaxis = list(title = "Rating Group", color = "#ffffff", fixedrange = TRUE),
+             yaxis = list(title = "Number of Titles", color = "#ffffff", gridcolor = "#2a2a2a", fixedrange = TRUE),
+             barmode = 'stack', dragmode = FALSE,
+             paper_bgcolor = "#1a1a1a", plot_bgcolor = "#1a1a1a", font = list(color = "#ffffff"),
+             legend = list(font = list(color = "#ffffff"), itemclick = FALSE, itemdoubleclick = FALSE)) %>%
+      config(displayModeBar = FALSE, scrollZoom = FALSE)
+  })
+
+  observeEvent(input$reset, {
+    updateSliderInput(session, "year_range", value = c(2008, 2021))
+    updateCheckboxGroupInput(session, "content_type", selected = c("Movie", "TV Show"))
+    updateSelectInput(session, "countries", selected = "All Countries")
+    updateSelectInput(session, "genres", selected = "All Genres")
+    updateRadioButtons(session, "rating_filter", selected = "all")
+  })
+}
+
+shinyApp(ui = ui, server = server)
